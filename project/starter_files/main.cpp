@@ -22,7 +22,9 @@
 #include <thread>
 #include <tuple>
 #include <vector>
-
+#include <iostream>
+#include <fstream>
+#include <typeinfo>
 
 #include "json.hpp"
 #include <carla/client/ActorBlueprint.h>
@@ -41,11 +43,16 @@
 #include "motion_planner.h"
 #include "planning_params.h"
 #include "utils.h"
+#include "pid_controller.h"
 
+#include <limits>
 #include <iostream>
+#include <fstream>
 #include <uWS/uWS.h>
 #include <math.h>
 #include <vector>
+#include <cmath>
+#include <time.h>
 
 using namespace std;
 using json = nlohmann::json;
@@ -66,6 +73,10 @@ string hasData(string s) {
 }
 
 
+template <typename T> int sgn(T val) {
+    return (T(0) < val) - (val < T(0));
+}
+
 double angle_between_points(double x1, double y1, double x2, double y2){
   return atan2(y2-y1, x2-x1);
 }
@@ -75,7 +86,7 @@ BehaviorPlannerFSM behavior_planner(
       P_STOP_THRESHOLD_SPEED, P_REQ_STOPPED_TIME, P_REACTION_TIME,
       P_MAX_ACCEL, P_STOP_LINE_BUFFER);
 
-// Declare and initialize the Motion Planner and all its class requirements
+// Decalre and initialized the Motion Planner and all its class requirements
 MotionPlanner motion_planner(P_NUM_PATHS, P_GOAL_OFFSET, P_ERR_TOLERANCE);
 
 bool have_obst = false;
@@ -88,13 +99,13 @@ void path_planner(vector<double>& x_points, vector<double>& y_points, vector<dou
   ego_state.location.x = x_points[x_points.size()-1];
   ego_state.location.y = y_points[y_points.size()-1];
   ego_state.velocity.x = velocity;
-  
+
   if( x_points.size() > 1 ){
   	ego_state.rotation.yaw = angle_between_points(x_points[x_points.size()-2], y_points[y_points.size()-2], x_points[x_points.size()-1], y_points[y_points.size()-1]);
-  	ego_state.velocity.x = v_points[v_points.size()-1];	
+  	ego_state.velocity.x = v_points[v_points.size()-1];
   	if(velocity < 0.01)
   		ego_state.rotation.yaw = yaw;
-  	
+
   }
 
   Maneuver behavior = behavior_planner.get_active_maneuver();
@@ -179,7 +190,7 @@ void set_obst(vector<double> x_points, vector<double> y_points, vector<State>& o
 		State obstacle;
 		obstacle.location.x = x_points[i];
 		obstacle.location.y = y_points[i];
-		obstacles.push_back(obstacle);  
+		obstacles.push_back(obstacle);
 	}
 	obst_flag = true;
 }
@@ -189,14 +200,49 @@ int main ()
   cout << "starting server" << endl;
   uWS::Hub h;
 
-  h.onMessage([](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode)
+  double new_delta_time;
+  int i = 0;
+
+  fstream file_steer;
+  file_steer.open("steer_pid_data.txt", std::ofstream::out | std::ofstream::trunc);
+  file_steer.close();
+  fstream file_throttle;
+  file_throttle.open("throttle_pid_data.txt", std::ofstream::out | std::ofstream::trunc);
+  file_throttle.close();
+
+  time_t prev_timer;
+  time_t timer;
+  time(&prev_timer);
+
+  // initialize pid steer
+  /**
+  * TODO (Step 1): create pid (pid_steer) for steer command and initialize values
+  **/
+  PID pid_steer = PID();
+  pid_steer.Init(0.5, 0.001, 1.2, 1.2, -1.2);
+
+  // initialize pid throttle
+  /**
+  * TODO (Step 1): create pid (pid_throttle) for throttle command and initialize values
+  **/
+  PID pid_throttle = PID();
+  pid_throttle.Init(0.5, 0.0001, 1.2, 1.0, -1.0);
+  
+  
+
+  h.onMessage([&pid_steer, &pid_throttle, &new_delta_time, &timer, &prev_timer, &i, &prev_timer](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode)
   {
-    
         auto s = hasData(data);
 
-
         if (s != "") {
+
           auto data = json::parse(s);
+
+          // create file to save values
+          fstream file_steer;
+          file_steer.open("steer_pid_data.txt");
+          fstream file_throttle;
+          file_throttle.open("throttle_pid_data.txt");
 
           vector<double> x_points = data["traj_x"];
           vector<double> y_points = data["traj_y"];
@@ -210,11 +256,14 @@ int main ()
           bool is_junction = data["waypoint_j"];
           string tl_state = data["tl_state"];
 
+          double x_position = data["location_x"];
+          double y_position = data["location_y"];
+          double z_position = data["location_z"];
+
           if(!have_obst){
           	vector<double> x_obst = data["obst_x"];
           	vector<double> y_obst = data["obst_y"];
           	set_obst(x_obst, y_obst, obstacles, have_obst);
-
           }
 
           State goal;
@@ -229,8 +278,102 @@ int main ()
 
           path_planner(x_points, y_points, v_points, yaw, velocity, goal, is_junction, tl_state, spirals_x, spirals_y, spirals_v, best_spirals);
 
+          // Save time and compute delta time
+          time(&timer);
+          new_delta_time = difftime(timer, prev_timer);
+          prev_timer = timer;
+
+          ////////////////////////////////////////
+          // Steering control
+          ////////////////////////////////////////
+
+          /**
+          * TODO (step 3): uncomment these lines
+          **/
+//           // Update the delta time with the previous command
+
+            pid_steer.UpdateDeltaTime(new_delta_time);
+			
+          // Compute steer error
+          double error_steer ;
+
+          double steer_output;
+
+          /**
+          * TODO (step 3): compute the steer error (error_steer) from the position and the desired trajectory
+          **/
+           error_steer =  yaw - (angle_between_points(x_points[0],y_points[0],x_points[1],y_points[1]));
+
+          /**
+          * TODO (step 3): uncomment these lines
+          **/
+           // Compute control to apply
+           pid_steer.UpdateError(error_steer);
+           steer_output = pid_steer.TotalError();
+
+           // Save data
+           file_steer.seekg(std::ios::beg);
+           for(int j=0; j < i - 1; ++j) {
+               file_steer.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+           }
+           file_steer  << i ;
+           file_steer  << " " << error_steer;
+           file_steer  << " " << steer_output << endl;
+
+          ////////////////////////////////////////
+          // Throttle control
+          ////////////////////////////////////////
+
+          /**
+          * TODO (step 2): uncomment these lines
+          **/
+           // Update the delta time with the previous command
+           pid_throttle.UpdateDeltaTime(new_delta_time);
+
+          // Compute error of speed
+          double error_throttle;
+		  double throttle_output;
+          double brake_output;
+          /**
+          * TODO (step 2): compute the throttle error (error_throttle) from the position and the desired speed
+          **/
+          // modify the following line for step 2
+          error_throttle = 0;
+
+          error_throttle =   velocity - v_points[v_points.size()-1]; ;
+
+
+
+          /**
+          * TODO (step 2): uncomment these lines
+          **/
+           // Compute control to apply
+           pid_throttle.UpdateError(error_throttle);
+           double throttle = pid_throttle.TotalError();
+
+           // Adapt the negative throttle to break
+           if (throttle > 0.0) {
+             throttle_output = throttle;
+             brake_output = 0;
+           } else {
+             throttle_output = 0;
+             brake_output = -throttle;
+           }
+
+           // Save data
+           file_throttle.seekg(std::ios::beg);
+           for(int j=0; j < i - 1; ++j){
+               file_throttle.ignore(std::numeric_limits<std::streamsize>::max(),'\n');
+           }
+           file_throttle  << i ;
+           file_throttle  << " " << error_throttle;
+           file_throttle  << " " << brake_output;
+           file_throttle  << " " << throttle_output << endl;
+
+
+          // Send control
           json msgJson;
-          msgJson["throttle"] = 0.25;
+          msgJson["throttle"] = throttle_output;
           msgJson["steer"] = 0.0;
           msgJson["trajectory_x"] = x_points;
           msgJson["trajectory_y"] = y_points;
@@ -246,9 +389,13 @@ int main ()
           msgJson["update_point_thresh"] = 16;
 
           auto msg = msgJson.dump();
-  
-      ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT); 
-      
+
+          i = i + 1;
+          file_steer.close();
+          file_throttle.close();
+
+      ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+
     }
 
   });
